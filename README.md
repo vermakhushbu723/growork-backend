@@ -40,13 +40,24 @@ created at the end, so the seed data stays as it is.
 
 ## Connecting the apps
 
-Both apps default to `http://10.0.2.2:5080/api/v1` on the Android emulator and
-`http://localhost:5080/api/v1` elsewhere. On a real phone (same Wi-Fi as this
-PC):
+Both apps default to the live API, `https://api.subkamyaab.achivora.com/api/v1`.
+To point a build at a local backend instead:
 
 ```bash
-flutter run --dart-define=API_BASE_URL=http://<your-PC-IP>:5080/api/v1
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:5080/api/v1        # emulator
+flutter run --dart-define=API_BASE_URL=http://<your-PC-IP>:5080/api/v1    # real phone, same Wi-Fi
 ```
+
+## Production
+
+Live at `https://api.subkamyaab.achivora.com` (server `200.234.41.207`):
+
+- Code in `/root/2ndProject/growork-backend`, `.env` there (mode 600, `NODE_ENV=production`,
+  `OTP_DEV_MODE=false`).
+- Runs under PM2 as `growork-api` on port 5080; nginx site
+  `/etc/nginx/sites-available/api.subkamyaab.achivora.com` proxies to it, SSL by certbot.
+- Update: `cd /root/2ndProject/growork-backend && git pull && npm ci && pm2 restart growork-api`.
+- Logs: `pm2 logs growork-api`.
 
 ## API overview (`/api/v1`)
 
