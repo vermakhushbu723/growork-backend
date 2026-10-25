@@ -9,6 +9,7 @@ const applicationSchema = withJson(new Schema(
     company: { type: Schema.Types.ObjectId, ref: 'Company', required: true },
     applicant: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     resumeName: { type: String, default: 'Resume.pdf' },
+    resumeUrl: { type: String, default: '' },
     coverLetter: { type: String, default: '' },
     noticePeriod: { type: String, default: 'Immediately' },
     status: { type: String, enum: APPLICATION_STATUSES, default: 'applied' },

@@ -64,6 +64,7 @@ listRoutes(
     name: z.string().trim().min(1, 'File name is required'),
     kind: z.string().trim().default('Document'),
     size: z.string().trim().default('—'),
+    url: z.string().trim().url('Upload the file first').or(z.literal('')).default(''),
     isPrimaryResume: z.boolean().default(false),
   }),
 );

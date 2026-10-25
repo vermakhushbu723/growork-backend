@@ -2,6 +2,8 @@ import type { Types } from 'mongoose';
 import { Notification, NOTIFICATION_TYPES } from '../models/Misc.js';
 import { Transaction, Wallet, TX_KINDS } from '../models/Wallet.js';
 import { ApiError } from '../utils/http.js';
+import { sendPush } from './push.js';
+import { emitTo } from './realtime.js';
 
 type Id = string | Types.ObjectId;
 
@@ -12,7 +14,10 @@ export async function notify(
   message: string,
   ref: Id = '',
 ) {
-  await Notification.create({ user, type, title, message, ref: String(ref) });
+  const n = await Notification.create({ user, type, title, message, ref: String(ref) });
+  // Live update for open apps, and a push for phones in the background.
+  emitTo(user, 'notification', n.toJSON());
+  void sendPush(user, { title, body: message, data: { type, ref: String(ref), notificationId: String(n._id) } });
 }
 
 /** Returns the user's wallet, creating an empty one on first use. */

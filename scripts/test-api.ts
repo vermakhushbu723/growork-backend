@@ -6,8 +6,15 @@
  * then deletes everything it created so only the seed data remains.
  */
 import 'dotenv/config';
+import { createHmac } from 'node:crypto';
+import { rmSync } from 'node:fs';
+import path from 'node:path';
+import { io as connectSocket, type Socket } from 'socket.io-client';
 import { connectDB, disconnectDB } from '../src/config/db.js';
 import { Application } from '../src/models/Application.js';
+import { Call } from '../src/models/Call.js';
+import { Payment } from '../src/models/Payment.js';
+import { credit } from '../src/services/core.js';
 import { Conversation, Message } from '../src/models/Chat.js';
 import { Company } from '../src/models/Company.js';
 import { Contract } from '../src/models/Contract.js';
@@ -36,6 +43,32 @@ async function call(method: string, path: string, body?: unknown, token?: string
   return { status: res.status, json, data: json.data };
 }
 
+const SOCKET_ORIGIN = new URL(BASE).origin;
+const SOCKET_PATH = `${new URL(BASE).pathname.replace(/\/$/, '')}/socket.io`;
+/** Files uploaded by this run (deleted at the end when testing a local server). */
+const uploaded: string[] = [];
+
+async function upload(name: string, type: string, content: string, token: string) {
+  const form = new FormData();
+  form.append('file', new Blob([content], { type }), name);
+  const res = await fetch(`${BASE}/uploads`, { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form });
+  const json = (await res.json().catch(() => ({}))) as Json;
+  return { status: res.status, json, data: json.data };
+}
+
+function openSocket(token: string) {
+  return new Promise<Socket>((resolve, reject) => {
+    const s = connectSocket(SOCKET_ORIGIN, { path: SOCKET_PATH, auth: { token }, transports: ['websocket'], reconnection: false });
+    s.on('connect', () => resolve(s));
+    s.on('connect_error', (e) => reject(new Error(`socket: ${e.message}`)));
+  });
+}
+
+/** Resolves with the promise's value, or fails after 5 s. */
+function within<T>(p: Promise<T>, message: string) {
+  return Promise.race([p, new Promise<never>((_, fail) => setTimeout(() => fail(new Error(message)), 5000))]);
+}
+
 async function check(name: string, fn: () => Promise<void>) {
   try {
     await fn();
@@ -57,6 +90,8 @@ const ok = (r: { status: number; json: Json }, status = 200) =>
 
 async function main() {
   console.log(`Testing ${BASE}\n`);
+  // Some checks look at or prepare records directly.
+  await connectDB();
   const stamp = Date.now();
   const seekerEmail = `test.seeker.${stamp}@example.com`;
   const recruiterEmail = `test.recruiter.${stamp}@example.com`;
@@ -64,6 +99,7 @@ async function main() {
   let seeker = '';
   let recruiter = '';
   let seekerId = '';
+  let recruiterId = '';
   const ids: Record<string, string> = {};
 
   console.log('Health');
@@ -85,6 +121,7 @@ async function main() {
     const r = await call('POST', '/auth/register', { app: 'recruiter', name: 'Test Recruiter', email: recruiterEmail, password: 'secret12', company: 'Test Co' });
     ok(r, 201);
     recruiter = r.data.token;
+    recruiterId = r.data.user.id;
     expect(r.data.user.company?.name === 'Test Co', 'company missing');
   });
   await check('POST /auth/register duplicate email → 409', async () => {
@@ -193,6 +230,40 @@ async function main() {
     expect(typeof r.data.applied === 'number', 'bad stats');
   });
 
+  console.log('\nUploads (resume file)');
+  await check('POST /uploads (PDF) → file is served', async () => {
+    const r = await upload('Test_Resume.pdf', 'application/pdf', '%PDF-1.4 test resume', seeker);
+    ok(r, 201);
+    expect(r.data.url.includes('/api/v1/files/') && r.data.size.endsWith('KB'), 'bad upload response');
+    ids.resumeUrl = r.data.url;
+    uploaded.push(r.data.url.split('/').pop());
+    const file = await fetch(BASE + '/files/' + r.data.url.split('/').pop());
+    expect(file.status === 200 && (await file.text()).startsWith('%PDF'), `file not served (${file.status})`);
+  });
+  await check('POST /uploads rejects .exe → 400, no login → 401', async () => {
+    ok(await upload('virus.exe', 'application/octet-stream', 'MZ', seeker), 400);
+    ok(await upload('a.pdf', 'application/pdf', '%PDF', ''), 401);
+  });
+  await check('POST /profile/documents with the uploaded file', async () => {
+    const r = await call('POST', '/profile/documents', { name: 'Test_Resume.pdf', kind: 'Resume / CV', size: '1 KB', url: ids.resumeUrl, isPrimaryResume: true }, seeker);
+    ok(r, 201);
+    expect(r.data.documents[0].url === ids.resumeUrl, 'url not saved');
+  });
+  await check('PATCH /auth/me student fields (college, course, year)', async () => {
+    const r = await call('PATCH', '/auth/me', { college: 'Test University', course: 'B.Tech CSE', graduationYear: '2027' }, seeker);
+    ok(r);
+    expect(r.data.college === 'Test University' && r.data.graduationYear === '2027', 'not saved');
+  });
+
+  console.log('\nPush devices');
+  await check('POST /devices + /devices/remove (tokens never in /auth/me)', async () => {
+    ok(await call('POST', '/devices', { token: `test-token-${stamp}`, platform: 'android' }, seeker));
+    ok(await call('POST', '/devices', { token: 'short' }, seeker), 400);
+    const me = await call('GET', '/auth/me', undefined, seeker);
+    expect(!('fcmTokens' in me.data), 'tokens leaked in /auth/me');
+    ok(await call('POST', '/devices/remove', { token: `test-token-${stamp}` }, seeker));
+  });
+
   console.log('\nCompany & team (recruiter app)');
   await check('GET + PATCH /company (GSTIN + website verifies)', async () => {
     ok(await call('GET', '/company', undefined, recruiter));
@@ -266,10 +337,27 @@ async function main() {
     ok(r);
     expect(r.data.hasApplied === false && r.data.matchScore === 100 && r.data.company?.name === 'Test Co', 'bad detail');
   });
-  await check('POST /jobs/:id/apply', async () => {
-    const r = await call('POST', `/jobs/${ids.job}/apply`, { resumeName: 'Test_Resume.pdf', coverLetter: 'I am a great fit for this role because I build Flutter apps.', noticePeriod: '15 days' }, seeker);
-    ok(r, 201);
-    ids.application = r.data.id;
+  await check('POST /jobs/:id/apply → recruiter gets a live socket notification', async () => {
+    const socket = await openSocket(recruiter);
+    try {
+      const live = new Promise<any>((resolve) => socket.on('notification', resolve));
+      // Name only: the server takes the file URL from the seeker's documents.
+      const r = await call('POST', `/jobs/${ids.job}/apply`, { resumeName: 'Test_Resume.pdf', coverLetter: 'I am a great fit for this role because I build Flutter apps.', noticePeriod: '15 days' }, seeker);
+      ok(r, 201);
+      ids.application = r.data.id;
+      const n = await within(live, 'no socket event in 5s');
+      expect(n.type === 'applicationReceived', `wrong event ${n.type}`);
+    } finally {
+      socket.disconnect();
+    }
+  });
+  await check('Socket rejects a bad token', async () => {
+    const err = await new Promise<string>((resolve) => {
+      const s = connectSocket(SOCKET_ORIGIN, { path: SOCKET_PATH, auth: { token: 'nope' }, transports: ['websocket'], reconnection: false });
+      s.on('connect', () => (s.disconnect(), resolve('connected')));
+      s.on('connect_error', (e) => (s.disconnect(), resolve(e.message)));
+    });
+    expect(err === 'unauthorized', `got ${err}`);
   });
   await check('POST /jobs/:id/apply twice → 409', async () => {
     ok(await call('POST', `/jobs/${ids.job}/apply`, { resumeName: 'x.pdf', coverLetter: 'Applying a second time should fail here.' }, seeker), 409);
@@ -297,7 +385,12 @@ async function main() {
     ok(r);
     expect(r.data.length === 1 && r.data[0].candidate.email === seekerEmail, 'applicant missing');
   });
-  await check('GET /recruiter/applicants/:id', async () => ok(await call('GET', `/recruiter/applicants/${ids.application}`, undefined, recruiter)));
+  await check('GET /recruiter/applicants/:id (resume file to open)', async () => {
+    const r = await call('GET', `/recruiter/applicants/${ids.application}`, undefined, recruiter);
+    ok(r);
+    expect(r.data.resumeUrl === ids.resumeUrl, `resumeUrl ${r.data.resumeUrl}`);
+    expect(r.data.candidate.resume?.url === ids.resumeUrl, 'candidate resume missing');
+  });
   await check('PATCH /recruiter/applicants/:id (shortlist + note) notifies the candidate', async () => {
     const r = await call('PATCH', `/recruiter/applicants/${ids.application}`, { status: 'shortlisted', note: 'Strong Flutter skills' }, recruiter);
     ok(r);
@@ -356,11 +449,72 @@ async function main() {
   });
 
   console.log('\nWallet & plans');
-  await check('POST /wallet/add-money', async () => {
+  await check('POST /wallet/add-money (direct only outside production)', async () => {
     const r = await call('POST', '/wallet/add-money', { amount: 50000, method: 'UPI' }, recruiter);
-    ok(r);
-    expect(r.data.balance >= 50000, 'no balance');
+    if (r.status === 403) {
+      // Production: money only comes in through Razorpay. Fund the test account directly.
+      await credit(recruiterId, 50000, 'Test funds', 'topup');
+    } else {
+      ok(r);
+      expect(r.data.balance >= 50000, 'no balance');
+    }
   });
+
+  console.log('\nPayments (Razorpay)');
+  const payConfig = await call('GET', '/payments/config', undefined, recruiter);
+  await check('GET /payments/config', async () => {
+    ok(payConfig);
+    expect(typeof payConfig.data.enabled === 'boolean', 'bad config');
+  });
+  await check('POST /payments/order validates the amount', async () => {
+    const r = await call('POST', '/payments/order', { amount: 10 }, recruiter);
+    ok(r, 400);
+  });
+  if (!payConfig.data.enabled) {
+    await check('POST /payments/order → 503 until Razorpay keys are set', async () => {
+      ok(await call('POST', '/payments/order', { amount: 500 }, recruiter), 503);
+    });
+  }
+  await check('POST /payments/webhook with a bad signature → 400', async () => {
+    const res = await fetch(`${BASE}/payments/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Razorpay-Signature': 'nope' },
+      body: JSON.stringify({ event: 'payment.captured' }),
+    });
+    expect(res.status === 400, `got ${res.status}`);
+  });
+  // Signature checks need the server's secrets (set the same RAZORPAY_* in
+  // this shell); skipped otherwise.
+  const keySecret = process.env.RAZORPAY_KEY_SECRET ?? '';
+  const hookSecret = process.env.RAZORPAY_WEBHOOK_SECRET ?? '';
+  if (payConfig.data.enabled && keySecret) {
+    await check('POST /payments/verify credits once; bad signature → 400', async () => {
+      const orderId = `order_test_${stamp}`;
+      await Payment.create({ user: recruiterId, amount: 700, orderId });
+      const before = (await call('GET', '/wallet', undefined, recruiter)).data.balance;
+      ok(await call('POST', '/payments/verify', { orderId, paymentId: 'pay_x', signature: 'bad' }, recruiter), 400);
+      const signature = createHmac('sha256', keySecret).update(`${orderId}|pay_test_${stamp}`).digest('hex');
+      const v = await call('POST', '/payments/verify', { orderId, paymentId: `pay_test_${stamp}`, signature }, recruiter);
+      ok(v);
+      expect(v.data.balance === before + 700, `balance ${before} → ${v.data.balance}`);
+      // Verifying again (or a webhook for it) must not credit twice.
+      ok(await call('POST', '/payments/verify', { orderId, paymentId: `pay_test_${stamp}`, signature }, recruiter));
+      expect((await call('GET', '/wallet', undefined, recruiter)).data.balance === before + 700, 'credited twice');
+      ok(await call('POST', '/payments/verify', { orderId, paymentId: 'x', signature: 'y' }, seeker), 404);
+    });
+  }
+  if (hookSecret) {
+    await check('POST /payments/webhook payment.captured credits the wallet', async () => {
+      const orderId = `order_hook_${stamp}`;
+      await Payment.create({ user: recruiterId, amount: 300, orderId });
+      const before = (await call('GET', '/wallet', undefined, recruiter)).data.balance;
+      const body = JSON.stringify({ event: 'payment.captured', payload: { payment: { entity: { id: `pay_hook_${stamp}`, order_id: orderId } } } });
+      const sig = createHmac('sha256', hookSecret).update(body).digest('hex');
+      const res = await fetch(`${BASE}/payments/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Razorpay-Signature': sig }, body });
+      expect(res.status === 200, `webhook ${res.status}`);
+      expect((await call('GET', '/wallet', undefined, recruiter)).data.balance === before + 300, 'not credited');
+    });
+  }
   await check('POST /wallet/withdraw more than balance → 402', async () => {
     ok(await call('POST', '/wallet/withdraw', { amount: 99999999, method: 'Bank' }, recruiter), 402);
   });
@@ -518,6 +672,47 @@ async function main() {
     ok(await call('GET', `/chats/${ids.chat}/messages`, undefined, other.data?.token), 404);
   });
 
+  console.log('\nCalls');
+  const probe = await call('POST', '/calls', { userId: seekerId, video: true }, recruiter);
+  const callsLive = probe.status !== 503;
+  if (!callsLive) {
+    await check('POST /calls → 503 until LiveKit keys are set', async () => ok(probe, 503));
+  } else {
+    if (probe.data?.call) await call('POST', `/calls/${probe.data.call.id}/end`, {}, recruiter);
+    await check('POST /calls → callee gets call:incoming, accept, end', async () => {
+      const socket = await openSocket(seeker);
+      try {
+        const incoming = new Promise<any>((resolve) => socket.on('call:incoming', resolve));
+        const start = await call('POST', '/calls', { userId: seekerId, video: true }, recruiter);
+        ok(start, 201);
+        expect(start.data.token && start.data.url && start.data.call.status === 'ringing', 'bad start');
+        const ev = await within(incoming, 'no call:incoming');
+        expect(ev.id === start.data.call.id && ev.other.name === 'Test Co', 'bad incoming event');
+        ok(await call('POST', `/calls/${start.data.call.id}/accept`, {}, recruiter), 403);
+        const acc = await call('POST', `/calls/${start.data.call.id}/accept`, {}, seeker);
+        ok(acc);
+        expect(acc.data.token && acc.data.call.status === 'accepted', 'not accepted');
+        const end = await call('POST', `/calls/${start.data.call.id}/end`, {}, seeker);
+        ok(end);
+        expect(end.data.status === 'ended', 'not ended');
+      } finally {
+        socket.disconnect();
+      }
+    });
+    await check('POST /calls/:id/decline + cancelled call → missed-call notification', async () => {
+      const a = await call('POST', '/calls', { userId: seekerId, video: false }, recruiter);
+      ok(await call('POST', `/calls/${a.data.call.id}/decline`, {}, seeker));
+      expect((await call('GET', `/calls/${a.data.call.id}`, undefined, recruiter)).data.status === 'declined', 'not declined');
+      const b = await call('POST', '/calls', { userId: seekerId, video: false }, recruiter);
+      ok(await call('POST', `/calls/${b.data.call.id}/end`, {}, recruiter));
+      const n = await call('GET', '/notifications', undefined, seeker);
+      expect(n.data.items.some((x: any) => x.type === 'call' && x.title === 'Missed call'), 'no missed-call notification');
+    });
+  }
+  await check(`POST /calls to yourself → ${callsLive ? 400 : 503}`, async () => {
+    ok(await call('POST', '/calls', { userId: seekerId }, seeker), callsLive ? 400 : 503);
+  });
+
   console.log('\nNotifications & reviews');
   await check('GET /notifications + PATCH :id/read + read-all', async () => {
     const l = await call('GET', '/notifications', undefined, seeker);
@@ -554,7 +749,6 @@ async function main() {
   });
 
   // Remove anything the API flows left behind that isn't owned by a user record.
-  await connectDB();
   const testUsers = await User.find({ email: { $regex: `^test\\.(seeker|recruiter)\\.${stamp}@` } }).select('_id');
   const company = await Company.findOne({ name: 'Test Co', 'members.email': recruiterEmail });
   const projectIds = [ids.project, ids.project2].filter(Boolean);
@@ -573,6 +767,8 @@ async function main() {
     Application.deleteMany({ _id: { $in: apps.map((a) => a._id) } }),
     Job.deleteMany({ _id: { $in: jobIds } }),
     Notification.deleteMany({ user: { $in: userIds } }),
+    Call.deleteMany({ $or: [{ caller: { $in: userIds } }, { callee: { $in: userIds } }] }),
+    Payment.deleteMany({ user: { $in: userIds } }),
     Saved.deleteMany({ $or: [{ user: { $in: userIds } }, { ref: { $in: [...jobIds, seekerId].filter(Boolean) } }] }),
     Otp.deleteMany({ target: { $in: [seekerEmail, phone.toLowerCase()] } }),
     company ? Company.deleteOne({ _id: company._id }) : Promise.resolve(),
@@ -588,6 +784,10 @@ async function main() {
     User.deleteMany({ _id: { $in: userIds } }),
   ]);
   await disconnectDB();
+  // Uploaded test files can only be removed when the server runs on this machine.
+  if (/localhost|127\.0\.0\.1/.test(BASE)) {
+    for (const f of uploaded) rmSync(path.resolve(process.env.UPLOAD_DIR ?? 'uploads', f), { force: true });
+  }
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) {

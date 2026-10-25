@@ -24,6 +24,7 @@ export const NOTIFICATION_TYPES = [
   'payment',
   'invite',
   'plan',
+  'call',
 ] as const;
 
 const notificationSchema = withJson(new Schema(

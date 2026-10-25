@@ -77,6 +77,7 @@ router.post(
   validate(
     z.object({
       resumeName: z.string().trim().min(1, 'Pick a resume'),
+      resumeUrl: z.string().trim().default(''),
       coverLetter: z.string().trim().min(20, 'Write at least 20 characters'),
       noticePeriod: z.string().trim().default('Immediately'),
     }),
@@ -87,12 +88,15 @@ router.post(
     if (await Application.exists({ job: job._id, applicant: req.user!.id })) {
       throw new ApiError(409, 'You have already applied to this job.');
     }
-    const me = await User.findById(req.user!.id).select('skills name');
+    const me = await User.findById(req.user!.id).select('skills name documents');
+    // Older app builds send only the name: take the file from the profile.
+    const resumeUrl = req.body.resumeUrl || me?.documents.find((d) => d.name === req.body.resumeName)?.url || '';
     const application = await Application.create({
       job: job._id,
       company: job.company,
       applicant: req.user!.id,
       ...req.body,
+      resumeUrl,
       matchScore: skillMatch(me?.skills ?? [], job.skills),
     });
     await notify(

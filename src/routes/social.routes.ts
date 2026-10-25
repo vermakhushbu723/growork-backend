@@ -11,6 +11,7 @@ import { Project } from '../models/Project.js';
 import { Proposal } from '../models/Proposal.js';
 import { User } from '../models/User.js';
 import { notify } from '../services/core.js';
+import { emitTo } from '../services/realtime.js';
 import * as dto from '../services/serialize.js';
 import { ApiError, asyncHandler } from '../utils/http.js';
 
@@ -142,6 +143,10 @@ router.post(
       const pid = String(p);
       if (pid !== req.user!.id) {
         c.unread.set(pid, (c.unread.get(pid) ?? 0) + 1);
+        emitTo(pid, 'message', {
+          conversationId: String(c._id),
+          message: { id: String(m._id), text: m.text, isMe: false, createdAt: m.createdAt },
+        });
         await notify(pid, 'message', 'New Message', `${req.user!.name}: ${req.body.text.slice(0, 80)}`, c._id);
       }
     }

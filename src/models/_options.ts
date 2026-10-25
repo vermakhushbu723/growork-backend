@@ -9,6 +9,7 @@ export function withJson<T extends Schema>(schema: T): T {
       ret.id = String(ret._id);
       delete ret._id;
       delete ret.passwordHash;
+      delete ret.fcmTokens;
       return ret;
     },
   });

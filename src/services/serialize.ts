@@ -19,6 +19,12 @@ export function companyLite(c: AnyDoc) {
   };
 }
 
+function primaryResume(u: Record<string, any>) {
+  const docs: Record<string, any>[] = u.documents ?? [];
+  const d = docs.find((x) => x.isPrimaryResume) ?? docs.find((x) => x.kind === 'Resume / CV');
+  return d ? { name: d.name, url: d.url ?? '' } : null;
+}
+
 /** Public profile of a job seeker / freelancer. */
 export function talent(u: AnyDoc, opts: { contact?: boolean } = {}) {
   if (!u || typeof u !== 'object' || !('name' in u)) return null;
@@ -32,6 +38,9 @@ export function talent(u: AnyDoc, opts: { contact?: boolean } = {}) {
     location: u.location ?? '',
     experience: u.experience ?? '',
     education: u.education ?? '',
+    college: u.college ?? '',
+    course: u.course ?? '',
+    graduationYear: u.graduationYear ?? '',
     skills: u.skills ?? [],
     about: u.bio ?? '',
     rate: isFreelancer ? `₹${(u.hourlyRate ?? 0).toLocaleString('en-IN')} /hr` : u.expectedSalary || '—',
@@ -46,7 +55,7 @@ export function talent(u: AnyDoc, opts: { contact?: boolean } = {}) {
     avatarUrl: u.avatarUrl ?? '',
     portfolio: (u.portfolio ?? []).map((p: AnyDoc) => p?.title),
     ...(opts.contact || u.settings?.showPhone ? { phone: u.phone ?? '' } : {}),
-    ...(opts.contact ? { email: u.email ?? '' } : {}),
+    ...(opts.contact ? { email: u.email ?? '', resume: primaryResume(u) } : {}),
   };
 }
 
@@ -89,6 +98,7 @@ export function applicant(a: AnyDoc) {
     matchScore: a.matchScore ?? 0,
     coverLetter: a.coverLetter ?? '',
     resumeName: a.resumeName ?? '',
+    resumeUrl: a.resumeUrl ?? '',
     noticePeriod: a.noticePeriod ?? '',
     note: a.note ?? '',
     offer: a.offer?.amount ? a.offer : null,

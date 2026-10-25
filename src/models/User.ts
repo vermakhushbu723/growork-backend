@@ -13,6 +13,8 @@ const documentSchema = withJson(new Schema(
     name: { type: String, required: true, trim: true },
     kind: { type: String, default: 'Document' },
     size: { type: String, default: '—' },
+    /** Uploaded file (empty for documents added before uploads existed). */
+    url: { type: String, default: '' },
     isPrimaryResume: { type: Boolean, default: false },
     uploadedAt: { type: Date, default: Date.now },
   },
@@ -74,6 +76,10 @@ const userSchema = withJson(new Schema(
     skills: { type: [String], default: [] },
     experience: { type: String, default: '' },
     education: { type: String, default: '' },
+    // Students: where and what they study (education is the one-line summary).
+    college: { type: String, default: '' },
+    course: { type: String, default: '' },
+    graduationYear: { type: String, default: '' },
     currentCompany: { type: String, default: '' },
     expectedSalary: { type: String, default: '' },
     noticePeriod: { type: String, default: 'Immediately' },
@@ -94,6 +100,8 @@ const userSchema = withJson(new Schema(
     company: { type: Schema.Types.ObjectId, ref: 'Company' },
 
     settings: { type: settingsSchema, default: () => ({}) },
+    /** FCM device tokens for push notifications. */
+    fcmTokens: { type: [String], default: [], select: false },
   },
   { timestamps: true },
 ));

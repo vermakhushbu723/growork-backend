@@ -5,6 +5,7 @@ import { validate } from '../middlewares/validate.js';
 import { Contract } from '../models/Contract.js';
 import { Transaction } from '../models/Wallet.js';
 import { credit, debit, notify, walletOf } from '../services/core.js';
+import { env } from '../config/env.js';
 import { ApiError, asyncHandler } from '../utils/http.js';
 
 const router = Router();
@@ -58,7 +59,8 @@ router.post(
   '/wallet/add-money',
   validate(amountBody),
   asyncHandler(async (req, res) => {
-    // A payment gateway would confirm the payment before this credit.
+    // Real money comes in through Razorpay (/payments/order → /payments/verify).
+    if (!env.allowDirectTopup) throw new ApiError(403, 'Add money through online payment.');
     const w = await credit(req.user!.id, req.body.amount, `Added money via ${req.body.method}`, 'topup');
     res.json({ success: true, data: { balance: w.balance } });
   }),
